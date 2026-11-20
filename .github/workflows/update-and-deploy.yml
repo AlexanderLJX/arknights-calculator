@@ -1,8 +1,10 @@
 # Keeps the operator data current and publishes the site to GitHub Pages.
 #
-# - Every 6 hours: downloads the latest EN game data. If the recruitable operators or
-#   their tags changed (a game patch), commits the new index.html and redeploys.
-#   If nothing changed, it does nothing.
+# - Every hour: reads the game data's version number (a 38-byte file). If it's the same
+#   version the site already has, it stops there. If the version changed (a game patch),
+#   it downloads the full game data, and if the recruitable operators or their tags
+#   changed, commits the new index.html and redeploys.
+# - Once a day: a full rebuild regardless of version, as a safety net.
 # - On every push to main: deploys the site.
 # - Can also be run by hand: Actions tab -> "Update data and deploy" -> Run workflow.
 #
@@ -13,7 +15,8 @@ name: Update data and deploy
 
 on:
   schedule:
-    - cron: "23 */6 * * *"
+    - cron: "23 * * * *"   # hourly: quick version check
+    - cron: "41 4 * * *"   # daily: full rebuild
   push:
     branches: [main]
   workflow_dispatch:
@@ -35,12 +38,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check for a new game data version
+        id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          CRON: ${{ github.event.schedule }}
+        run: |
+          latest=$(curl -fsSL https://raw.githubusercontent.com/ArknightsAssets/ArknightsGamedata/master/en/gamedata/excel/data_version.txt | sed -n 's/.*VersionControl:\([^[:space:]]*\).*/\1/p' || true)
+          current=$(grep -o '"version":"[^"]*"' index.html | head -1 | cut -d'"' -f4)
+          echo "Site has $current, latest game data is ${latest:-unknown}"
+          if [ "$EVENT" = "schedule" ] && [ "$CRON" = "23 * * * *" ] && [ -n "$latest" ] && [ "$latest" = "$current" ]; then
+            echo "Same version, nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-node@v4
+        if: steps.check.outputs.skip != 'true'
         with:
           node-version: 22
 
       - name: Rebuild operator data from the latest game data
         id: build
+        if: steps.check.outputs.skip != 'true'
         run: node build-data.mjs
 
       - name: Commit updated data

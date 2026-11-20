@@ -12,10 +12,12 @@ The workflow in `.github/workflows/update-and-deploy.yml` then deploys the site 
 push to `main`.
 
 ## Automatic data updates
-Every 6 hours the workflow downloads the latest Global (EN) game data and rebuilds the
-operator list. If a game patch added operators or changed tags, it commits the new
-`index.html` (the commit message lists what changed) and redeploys. If nothing changed,
-it does nothing. You can also run it by hand from the Actions tab ("Run workflow").
+Every hour the workflow reads the game data's version number (a tiny file). If it's the
+same version the site already has, it stops there. When a game patch lands in the data
+repo, it downloads the full Global (EN) game data and rebuilds the operator list. If
+operators or tags changed, it commits the new `index.html` (the commit message lists what
+changed) and redeploys. A full rebuild also runs once a day as a safety net. You can run it
+by hand from the Actions tab ("Run workflow").
 
 If the game data format ever changes, `build-data.mjs` refuses to write, the run fails and
 GitHub emails you; the live site keeps the last good data.
