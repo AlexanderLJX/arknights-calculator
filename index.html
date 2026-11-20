@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recruit Tag Calculator</title>
+<meta name="description" content="Arknights recruitment tag calculator with screenshot tag recognition that runs locally in your browser (WebAssembly OCR).">
+<style>
+:root {
+  --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --line: #2a2f3a;
+  --text: #e7e9ee; --muted: #8b93a3; --accent: #1e9be9; --accent-ink: #fff;
+  --ok: #3ecf8e; --warn: #f5a524;
+  --r6: #ff8a3d; --r5: #ffd23f; --r4: #c79bff; --r3: #5cb4ff; --r2: #b5e061; --r1: #b9bec8;
+  --chip: #262b35; --chip-on: #1e9be9;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f3f4f7; --panel: #ffffff; --panel-2: #f6f7fa; --line: #dde0e6;
+    --text: #15181e; --muted: #5f6675; --chip: #eceef2;
+    --r6: #e0631a; --r5: #b88a00; --r4: #8a55d6; --r3: #1f7fd1; --r2: #5f9a10; --r1: #6b7280;
+    color-scheme: light;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.wrap { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -.01em; }
+h2 { font-size: 17px; margin: 0 0 12px; }
+.sub { color: var(--muted); margin: 0 0 20px; }
+.grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 16px; align-items: start; }
+@media (max-width: 860px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+.stack { display: grid; gap: 16px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.spacer { flex: 1; }
+button { font: inherit; color: inherit; cursor: pointer; }
+.btn { background: var(--chip); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+/* drop zone */
+.drop { border: 2px dashed var(--line); border-radius: 10px; padding: 18px; text-align: center; color: var(--muted); cursor: pointer; transition: border-color .15s, background .15s; }
+.drop.hover, .drop:hover { border-color: var(--accent); background: var(--panel-2); }
+.drop strong { color: var(--text); }
+kbd { background: var(--chip); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 13px; }
+.preview { margin-top: 12px; display: none; }
+.preview canvas { width: 100%; height: auto; border-radius: 8px; display: block; }
+.status { margin-top: 10px; font-size: 14px; color: var(--muted); min-height: 1.5em; }
+.status.ok { color: var(--ok); }
+.status.warn { color: var(--warn); }
+.bar { height: 4px; background: var(--chip); border-radius: 2px; overflow: hidden; margin-top: 6px; display: none; }
+.bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+
+/* tags */
+.slots { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin: 4px 0 14px; }
+.slot { border: 1px dashed var(--line); border-radius: 8px; height: 38px; display: grid; place-items: center; font-size: 12px; line-height: 1.15; color: var(--muted); padding: 0 4px; text-align: center; overflow: hidden; }
+.slot.on { border-style: solid; border-color: var(--accent); color: var(--text); background: var(--panel-2); }
+.group-label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 10px 0 6px; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag { background: var(--chip); border: 1px solid transparent; border-radius: 7px; padding: 5px 11px; font-size: 14px; }
+.tag:hover { border-color: var(--accent); }
+.tag.on { background: var(--chip-on); color: #fff; }
+.tag.rare { box-shadow: inset 0 0 0 1px var(--r5); }
+
+/* results */
+.hint { color: var(--muted); font-size: 14px; }
+.combo { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--panel-2); margin-bottom: 10px; }
+.combo.best { border-color: var(--accent); }
+.combo-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.badge { font-weight: 700; border-radius: 6px; padding: 2px 8px; font-size: 13px; color: #111; }
+.b6 { background: var(--r6); } .b5 { background: var(--r5); } .b4 { background: var(--r4); } .b3 { background: var(--r3); } .b2 { background: var(--r2); } .b1 { background: var(--r1); }
+.combo-tags { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+.ctag { background: var(--chip-on); color: #fff; border-radius: 6px; padding: 1px 8px; font-size: 13px; }
+.time { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; }
+.ops { display: flex; flex-wrap: wrap; gap: 4px; }
+.op { font-size: 13px; padding: 1px 7px; border-radius: 5px; background: var(--chip); border-left: 3px solid; }
+.op.s6 { border-color: var(--r6); } .op.s5 { border-color: var(--r5); } .op.s4 { border-color: var(--r4); }
+.op.s3 { border-color: var(--r3); } .op.s2 { border-color: var(--r2); } .op.s1 { border-color: var(--r1); }
+.op.only::after { content: " ●"; color: var(--ok); font-size: 10px; vertical-align: middle; }
+.op.cand { background: var(--panel); outline: 1px solid var(--accent); }
+details > summary { cursor: pointer; color: var(--muted); margin: 6px 0 10px; }
+.legend { font-size: 12px; color: var(--muted); margin-top: 8px; }
+.rarity-row { margin-bottom: 10px; }
+.rarity-row .label { font-weight: 700; font-size: 13px; margin-bottom: 4px; }
+footer { color: var(--muted); font-size: 13px; margin-top: 28px; }
+footer a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Recruit Tag Calculator</h1>
+  <p class="sub">Paste a screenshot of your Recruitment screen, or pick the five tags yourself. The page lists every tag combination that guarantees a 4★ or better, or a 1★ Robot.</p>
+
+  <div class="grid">
+    <div class="stack">
+      <section class="card">
+        <h2>Screenshot</h2>
+        <div class="drop" id="drop" tabindex="0">
+          <strong>Paste</strong> with <kbd>Ctrl</kbd>+<kbd>V</kbd>, drop an image here, or <strong>click to choose</strong>.<br>
+          <span style="font-size:13px">Everything runs on this device. The image is never uploaded.</span>
+        </div>
+        <input type="file" id="file" accept="image/*" hidden>
+        <div class="preview" id="preview"><canvas id="canvas"></canvas></div>
+        <div class="bar" id="bar"><i></i></div>
+        <div class="status" id="status"></div>
+      </section>
+
+      <section class="card">
+        <div class="row"><h2 style="margin:0">Tags</h2><span class="spacer"></span>
+          <span class="hint" id="count">0 / 5</span>
+          <button class="btn" id="reset">Reset</button></div>
+        <div class="slots" id="slots"></div>
+        <div id="taglist"></div>
+      </section>
+    </div>
+
+    <div class="stack">
+      <section class="card">
+        <h2>Recommended combinations</h2>
+        <div id="results"><p class="hint">Select tags to see the results.</p></div>
+      </section>
+      <section class="card">
+        <details id="allops">
+          <summary>All recruitable operators (<span id="opcount"></span>)</summary>
+          <div id="oplist"></div>
+          <div class="legend"><span class="op s3 only">name</span> ● = recruitment only. Outlined = possible result of a combination listed above.</div>
+        </details>
+      </section>
+    </div>
+  </div>
+
+  <footer id="footer"></footer>
+</div>
+
+<!-- Tesseract.js: Tesseract OCR compiled to WebAssembly. Runs on the CPU in a Web Worker. -->
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script>
+"use strict";
+// ---------------------------------------------------------------------------
+// Data (regenerate with: node build-data.mjs)
+// operators: [name, rarity, recruitmentOnly, [tag indexes]]; tag index = tagId - 1
+// ---------------------------------------------------------------------------
+const DATA = /*DATA_START*/{"region":"en","version":"52.6.0","updated":"2026-11-20","tags":["Guard","Sniper","Defender","Medic","Supporter","Caster","Specialist","Vanguard","Melee","Ranged","Top Operator","Crowd-Control","Nuker","Senior Operator","Healing","Support","Starter","DP-Recovery","DPS","Survival","AoE","Defense","Slow","Debuff","Fast-Redeploy","Shift","Summon","Robot","Elemental"],"operators":[["Lancet-2",1,1,[3,9,27,14]],["Castle-3",1,1,[0,8,27,15]],["THRM-EX",1,1,[6,8,27,12]],["Justice Knight",1,1,[1,9,27,15]],["Friston-3",1,1,[2,8,27,21]],["PhonoR-0",1,1,[4,9,27,28]],["CONFESS-47",1,1,[7,8,27,11]],["GALLUS²",1,1,[5,9,27,23]],["Yato",2,1,[7,8,16]],["Noir Corne",2,1,[2,8,16]],["Rangers",2,1,[1,9,16]],["Durin",2,1,[5,9,16]],["12F",2,1,[5,9,16]],["Adnachiel",3,1,[1,9,18]],["Fang",3,0,[7,8,17]],["Vanilla",3,0,[7,8,17]],["Plume",3,0,[7,8,18,17]],["Melantha",3,0,[0,8,18,19]],["Beagle",3,0,[2,8,21]],["Kroos",3,0,[1,9,18]],["Lava",3,0,[5,9,20]],["Hibiscus",3,0,[3,9,14]],["Ansel",3,0,[3,9,14]],["Steward",3,0,[5,9,18]],["Orchid",3,0,[4,9,22]],["Catapult",3,0,[1,9,20]],["Midnight",3,0,[0,8,18]],["Popukar",3,0,[0,8,20,19]],["Spot",3,0,[2,8,21,14]],["Estelle",4,1,[0,8,20,19]],["Purestream",4,1,[3,9,14,15]],["Haze",4,0,[5,9,18,23]],["Gitano",4,0,[5,9,20]],["Jessica",4,0,[1,9,18,19]],["Meteor",4,0,[1,9,18,23]],["Shirayuki",4,0,[1,9,20,22]],["Scavenger",4,0,[7,8,17,18]],["Vigna",4,0,[7,8,18,17]],["Dobermann",4,0,[0,8,18,15]],["Matoimaru",4,0,[0,8,19,18]],["Frostleaf",4,0,[0,8,22,18]],["Mousse",4,0,[0,8,18]],["Gravel",4,0,[6,8,24,21]],["Rope",4,0,[6,8,25]],["Myrrh",4,0,[3,9,14]],["Perfumer",4,0,[3,9,14]],["Matterhorn",4,0,[2,8,21]],["Cuora",4,0,[2,8,21]],["Gummy",4,0,[2,8,21,14]],["Earthspirit",4,0,[4,9,22]],["Shaw",4,0,[6,8,25]],["Beehunter",4,0,[0,8,18]],["Greyy",4,0,[5,9,20,22]],["Sussurro",4,0,[3,9,14]],["Myrtle",4,0,[7,8,17,14]],["Vermeil",4,0,[1,9,18]],["May",4,0,[1,9,18,22]],["Ambriel",4,0,[1,9,18,22]],["Utage",4,0,[0,8,18,19]],["Cutter",4,0,[0,8,12,18]],["Podenco",4,0,[4,9,22,14]],["Click",4,0,[5,9,18,11]],["Jaye",4,0,[6,8,24,18]],["Aciddrop",4,0,[1,9,18]],["Arene",4,0,[0,8,18]],["Bubble",4,0,[2,8,21]],["Jackie",4,0,[0,8,18]],["Pinecone",4,0,[1,9,20,18]],["Beanstalk",4,0,[7,9,17,26]],["Indigo",4,0,[5,9,18,11]],["Indra",5,1,[0,8,18,19,13]],["Vulcan",5,1,[2,8,19,21,18,13]],["Ptilopsis",5,0,[3,9,14,15,13]],["Zima",5,0,[7,8,17,15,13]],["Texas",5,0,[7,8,17,11,13]],["Specter",5,0,[0,8,20,19,13]],["Blue Poison",5,0,[1,9,18,13]],["Platinum",5,0,[1,9,18,13]],["Meteorite",5,0,[1,9,20,23,13]],["Mayer",5,0,[4,9,26,11,13]],["Silence",5,0,[3,9,14,13]],["Warfarin",5,0,[3,9,14,15,13]],["Nearl",5,0,[2,8,21,14,13]],["Projekt Red",5,0,[6,8,24,11,13]],["Liskarm",5,0,[2,8,21,18,13]],["Croissant",5,0,[2,8,21,25,13]],["Provence",5,0,[1,9,18,13]],["Firewatch",5,0,[1,9,18,12,13]],["Cliffheart",5,0,[6,8,25,18,13]],["Pramanix",5,0,[4,9,23,13]],["Istina",5,0,[4,9,22,18,13]],["Manticore",5,0,[6,8,18,19,13]],["FEater",5,0,[6,8,25,22,13]],["Nightmare",5,0,[5,9,18,14,22,13]],["Swire",5,0,[0,8,18,15,13]],["Glaucus",5,0,[4,9,22,11,13]],["Astesia",5,0,[0,8,18,21,13]],["Executor",5,0,[1,9,20,13]],["Waai Fu",5,0,[6,8,24,23,13]],["GreyThroat",5,0,[1,9,18,13]],["Reed",5,0,[7,8,17,18,13]],["Broca",5,0,[0,8,20,19,13]],["Hung",5,0,[2,8,21,14,13]],["Leizi",5,0,[5,9,18,13]],["Sesa",5,0,[1,9,20,23,13]],["Shamare",5,0,[4,9,23,13]],["Elysium",5,0,[7,8,17,15,13]],["Asbestos",5,0,[2,8,21,18,13]],["Tsukinogi",5,0,[4,9,15,19,13]],["Leonhardt",5,0,[5,9,20,12,13]],["Ayerscarpe",5,0,[0,8,18,20,13]],["Andreana",5,0,[1,9,18,22,13]],["Chiave",5,0,[7,8,17,18,13]],["Beeswax",5,0,[5,9,20,21,13]],["Flint",5,0,[0,8,18,13]],["April",5,0,[1,9,18,13]],["Aosta",5,0,[1,9,20,13]],["Whisperain",5,0,[3,9,14,13]],["Kafka",5,0,[6,8,24,11,13]],["Iris",5,0,[5,9,18,13]],["Mr. Nothing",5,0,[6,8,24,18,13]],["Toddifons",5,0,[1,9,18,13]],["Akafuyu",5,0,[0,8,19,18,13]],["Kirara",5,0,[6,8,18,19,13]],["Exusiai",6,0,[1,9,18,10]],["Siege",6,0,[7,8,17,18,10]],["Ifrit",6,0,[5,9,20,23,10]],["Shining",6,0,[3,9,14,15,10]],["Nightingale",6,0,[3,9,14,15,10]],["Hoshiguma",6,0,[2,8,21,18,10]],["Saria",6,0,[2,8,21,14,15,10]],["SilverAsh",6,0,[0,8,18,15,10]],["Skadi",6,0,[0,8,18,19,10]],["Ch'en",6,0,[0,8,12,18,10]],["Schwarz",6,0,[1,9,18,10]],["Hellagur",6,0,[0,8,18,19,10]],["Magallan",6,0,[4,9,15,22,18,10]],["Mostima",6,0,[5,9,20,15,11,10]],["Blaze",6,0,[0,8,18,19,10]],["Aak",6,0,[6,9,15,18,10]],["Ceobe",6,0,[5,9,18,11,10]],["Bagpipe",6,0,[7,8,17,18,10]],["Phantom",6,0,[6,8,24,11,18,10]],["Weedy",6,0,[6,8,25,18,11,10]],["Rosa",6,0,[1,9,18,11,10]],["Suzuran",6,0,[4,9,22,15,18,10]],["Thorns",6,0,[0,8,18,21,10]],["Eunectes",6,0,[2,8,18,19,21,10]],["Surtr",6,0,[0,8,18,10]],["Blemishine",6,0,[2,8,21,14,18,10]],["Mudrock",6,0,[2,8,19,21,18,10]],["Mountain",6,0,[0,8,18,19,10]],["Archetto",6,0,[1,9,18,10]],["Saga",6,0,[7,8,17,18,10]],["Passenger",6,0,[5,9,18,10]],["Kal'tsit",6,0,[3,9,26,14,10]],["Carnelian",6,0,[5,9,20,21,10]],["Pallas",6,0,[0,8,18,15,10]]]}/*DATA_END*/;
+
+const TAGS = DATA.tags;
+const OPS = DATA.operators.map(([name, rarity, only, t]) => ({ name, rarity, only: !!only, tags: new Set(t) }));
+// tag indexes (tagId - 1) from gacha_table
+const T = { TOP: 10, SENIOR: 13, STARTER: 16, ROBOT: 27 };
+const GROUPS = [
+  ["Qualification", [16, 13, 10]],
+  ["Position", [8, 9]],
+  ["Class", [7, 0, 2, 1, 5, 3, 4, 6]],
+  ["Affix", [11, 12, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]],
+];
+const MAX_TAGS = 5;
+
+// ---------------------------------------------------------------------------
+// Calculator
+// ---------------------------------------------------------------------------
+// Rarity windows by recruitment time (from the game's recruit rules):
+//   1:00-3:50 -> 1-4★   4:00-7:30 -> 2-5★   7:40-9:00 -> 3-5★   6★ only with Top Operator
+const WINDOW_9H = [3, 5];
+const WINDOW_ROBOT = [1, 4];
+const VALUE = { 6: 5, robot: 4, 5: 3, 4: 2, 3: 1, 2: 0, 1: 0 };
+
+function subsets(arr, maxLen) {
+  const out = [];
+  const rec = (start, cur) => {
+    if (cur.length) out.push(cur);
+    if (cur.length === maxLen) return;
+    for (let i = start; i < arr.length; i++) rec(i + 1, [...cur, arr[i]]);
+  };
+  rec(0, []);
+  return out;
+}
+
+function pool(combo, [lo, hi]) {
+  const top = combo.includes(T.TOP);
+  return OPS.filter((o) => combo.every((t) => o.tags.has(t)))
+    .filter((o) => (o.rarity === 6 ? top : o.rarity >= lo && o.rarity <= hi))
+    .sort((a, b) => b.rarity - a.rarity || a.name.localeCompare(b.name));
+}
+
+function calculate(selected) {
+  const results = [];
+  const combos = subsets(selected, 3).sort((a, b) => a.length - b.length);
+  for (const combo of combos) {
+    let ops, kind, time;
+    const robots = pool(combo, WINDOW_ROBOT);
+    if (robots.length && robots.every((o) => o.rarity === 1)) {
+      ops = robots; kind = "robot"; time = "3:50:00";
+    } else {
+      ops = pool(combo, WINDOW_9H); kind = "normal"; time = "9:00:00";
+    }
+    if (!ops.length) continue;
+    const key = ops.map((o) => o.name).join("|");
+    // adding a tag that doesn't change the result is pointless
+    if (results.some((r) => r.key === key && r.combo.every((t) => combo.includes(t)))) continue;
+    const min = ops[ops.length - 1].rarity, max = ops[0].rarity;
+    results.push({ combo, ops, key, min, max, kind, time, value: kind === "robot" ? VALUE.robot : VALUE[min] });
+  }
+  results.sort((a, b) => b.value - a.value || b.max - a.max || a.combo.length - b.combo.length || a.ops.length - b.ops.length);
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// UI state
+// ---------------------------------------------------------------------------
+let selected = [];
+const $ = (id) => document.getElementById(id);
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+function setSelected(list, fromUrl) {
+  selected = [...new Set(list)].filter((t) => t >= 0 && t < TAGS.length).slice(0, MAX_TAGS);
+  if (!fromUrl) {
+    const url = new URL(location.href);
+    if (selected.length) url.searchParams.set("tags", selected.map((t) => t + 1).join(","));
+    else url.searchParams.delete("tags");
+    history.replaceState(null, "", url);
+  }
+  render();
+}
+
+function toggle(t) {
+  if (selected.includes(t)) setSelected(selected.filter((x) => x !== t));
+  else if (selected.length < MAX_TAGS) setSelected([...selected, t]);
+}
+
+function buildTagButtons() {
+  $("taglist").innerHTML = GROUPS.map(([label, ids]) =>
+    `<div class="group-label">${label}</div><div class="tags">` +
+    ids.filter((i) => TAGS[i]).map((i) =>
+      `<button class="tag${i === T.TOP || i === T.SENIOR ? " rare" : ""}" data-t="${i}">${esc(TAGS[i])}</button>`).join("") +
+    `</div>`).join("");
+  $("taglist").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-t]");
+    if (b) toggle(+b.dataset.t);
+  });
+  $("reset").onclick = () => { setSelected([]); clearPreview(); };
+}
+
+const opChip = (o, cand) => `<span class="op s${o.rarity}${o.only ? " only" : ""}${cand ? " cand" : ""}" title="${o.rarity}★">${esc(o.name)}</span>`;
+
+function comboCard(r, best) {
+  const label = r.kind === "robot" ? "1★ Robot" : r.min === r.max ? `${r.min}★` : `${r.min}★+`;
+  const word = r.kind === "robot" || r.min === r.max ? "guaranteed" : "or better";
+  return `<div class="combo${best ? " best" : ""}">
+    <div class="combo-head">
+      <span class="badge b${r.kind === "robot" ? 1 : r.min}">${label}</span><span class="hint">${word}</span>
+      <span class="combo-tags">${r.combo.map((t) => `<span class="ctag">${esc(TAGS[t])}</span>`).join('<span class="hint">+</span>')}</span>
+      <span class="time">⏱ ${r.time}${r.kind === "robot" ? " or less" : ""}</span>
+    </div>
+    <div class="ops">${r.ops.map((o) => opChip(o)).join("")}</div>
+  </div>`;
+}
+
+function render() {
+  // tag buttons + slots
+  document.querySelectorAll("#taglist [data-t]").forEach((b) => b.classList.toggle("on", selected.includes(+b.dataset.t)));
+  $("slots").innerHTML = Array.from({ length: MAX_TAGS }, (_, i) =>
+    selected[i] !== undefined ? `<div class="slot on">${esc(TAGS[selected[i]])}</div>` : `<div class="slot">${i + 1}</div>`).join("");
+  $("count").textContent = `${selected.length} / ${MAX_TAGS}`;
+
+  // results
+  const out = $("results");
+  const cand = new Set();
+  if (!selected.length) {
+    out.innerHTML = `<p class="hint">Select tags to see the results.</p>`;
+  } else {
+    const res = calculate(selected);
+    const good = res.filter((r) => r.kind === "robot" || r.min >= 4);
+    const rest = res.filter((r) => !good.includes(r));
+    good.forEach((r) => r.ops.forEach((o) => cand.add(o.name)));
+    let html = "";
+    if (selected.includes(T.TOP)) html += `<p class="hint">⭐ <b>Top Operator</b> is present: select it and set <b>9:00:00</b> for a guaranteed 6★.</p>`;
+    else if (selected.includes(T.SENIOR)) html += `<p class="hint">⭐ <b>Senior Operator</b> is present: select it and set <b>9:00:00</b> for a guaranteed 5★.</p>`;
+    html += good.length
+      ? good.map((r, i) => comboCard(r, i === 0)).join("")
+      : `<p class="hint">No combination guarantees 4★ or better. Refresh the tags, or recruit for 9:00:00 for a 3★ or better.</p>`;
+    if (rest.length) html += `<details><summary>Combinations that can give 3★ (${rest.length})</summary>${rest.map((r) => comboCard(r)).join("")}</details>`;
+    out.innerHTML = html;
+  }
+
+  // all operators
+  $("oplist").innerHTML = [6, 5, 4, 3, 2, 1].map((r) => {
+    const list = OPS.filter((o) => o.rarity === r);
+    return list.length ? `<div class="rarity-row"><div class="label" style="color:var(--r${r})">${"★".repeat(r)}</div><div class="ops">${list.map((o) => opChip(o, cand.has(o.name))).join("")}</div></div>` : "";
+  }).join("");
+}
+
+// ---------------------------------------------------------------------------
+// Screenshot -> tags
+//   1. find the dark tag buttons on the light panel (connected components)
+//   2. crop each button, binarize (white text -> black on white), upscale
+//   3. OCR each crop with Tesseract (WASM, single-line mode, letters only)
+//   4. fuzzy-match the text against the 29 known tag names
+//   Fallback: OCR the whole image and look for tag names in the text.
+// ---------------------------------------------------------------------------
+const norm = (s) => s.toLowerCase().replace(/0/g, "o").replace(/[1|]/g, "l").replace(/5/g, "s").replace(/[^a-z]/g, "");
+const TAG_NORM = TAGS.map(norm);
+
+function lev(a, b) {
+  const m = a.length, n = b.length;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j), cur = new Array(n + 1);
+  for (let i = 1; i <= m; i++) {
+    cur[0] = i;
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    [prev, cur] = [cur, prev];
+  }
+  return prev[n];
+}
+
+function matchTag(text) {
+  const s = norm(text);
+  if (s.length < 3) return null;
+  let best = null;
+  TAG_NORM.forEach((t, i) => {
+    const d = lev(s, t);
+    const allowed = t.length <= 3 ? 0 : t.length <= 5 ? 1 : Math.floor(t.length * 0.3);
+    if (d <= allowed && (!best || d < best.d)) best = { tag: i, d };
+  });
+  return best;
+}
+
+let workerPromise = null;
+function getWorker() {
+  if (!workerPromise) {
+    workerPromise = Tesseract.createWorker("eng", 1, {
+      logger: (m) => {
+        if (m.status && m.status.startsWith("loading")) progress(m.progress, "Loading OCR engine (first time only, a few MB)…");
+      },
+    });
+  }
+  return workerPromise;
+}
+
+function lumAt(d, i) { return 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; }
+
+// Returns boxes {x,y,w,h} (in the analysis canvas' pixels) that look like dark tag buttons on a light panel.
+function findTagButtons(img) {
+  const { width: W, height: H, data: d } = img;
+  const mask = new Uint8Array(W * H);
+  for (let p = 0, i = 0; p < W * H; p++, i += 4) {
+    const r = d[i], g = d[i + 1], b = d[i + 2];
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    const sat = Math.max(r, g, b) - Math.min(r, g, b);
+    mask[p] = lum < 100 && sat < 45 ? 1 : 0;
+  }
+  const seen = new Uint8Array(W * H);
+  const stack = new Int32Array(W * H);
+  const boxes = [];
+  for (let p0 = 0; p0 < W * H; p0++) {
+    if (!mask[p0] || seen[p0]) continue;
+    let sp = 0, count = 0, x0 = W, x1 = 0, y0 = H, y1 = 0;
+    stack[sp++] = p0; seen[p0] = 1;
+    while (sp) {
+      const p = stack[--sp];
+      const x = p % W, y = (p / W) | 0;
+      count++;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      if (x > 0 && mask[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; stack[sp++] = p - 1; }
+      if (x < W - 1 && mask[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; stack[sp++] = p + 1; }
+      if (y > 0 && mask[p - W] && !seen[p - W]) { seen[p - W] = 1; stack[sp++] = p - W; }
+      if (y < H - 1 && mask[p + W] && !seen[p + W]) { seen[p + W] = 1; stack[sp++] = p + W; }
+    }
+    const w = x1 - x0 + 1, h = y1 - y0 + 1;
+    const ref = Math.min(W, H);
+    if (h < ref * 0.03 || h > ref * 0.15) continue;
+    if (w / h < 1.8 || w / h > 6) continue;
+    if (count / (w * h) < 0.55) continue;
+    // must sit on a light panel: sample a ring just outside the box
+    let ringSum = 0, ringN = 0;
+    const pad = Math.max(3, Math.round(h * 0.15));
+    for (let x = x0; x <= x1; x += 2) for (const y of [y0 - pad, y1 + pad]) {
+      if (y >= 0 && y < H) { ringSum += lumAt(d, (y * W + x) * 4); ringN++; }
+    }
+    for (let y = y0; y <= y1; y += 2) for (const x of [x0 - pad, x1 + pad]) {
+      if (x >= 0 && x < W) { ringSum += lumAt(d, (y * W + x) * 4); ringN++; }
+    }
+    if (!ringN || ringSum / ringN < 140) continue;
+    // must contain some bright text pixels
+    let bright = 0;
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (lumAt(d, (y * W + x) * 4) > 170) bright++;
+    const br = bright / (w * h);
+    if (br < 0.02 || br > 0.45) continue;
+    boxes.push({ x: x0, y: y0, w, h });
+  }
+  return boxes.sort((a, b) => (Math.abs(a.y - b.y) < a.h / 2 ? a.x - b.x : a.y - b.y));
+}
+
+// Crop a button, keep only bright (text) pixels as black on white, upscale for Tesseract.
+function prepareCrop(src, box) {
+  const inset = Math.round(box.h * 0.1);
+  const sx = box.x + inset, sy = box.y + inset, sw = box.w - inset * 2, sh = box.h - inset * 2;
+  const scale = 64 / sh, pad = 16;
+  const c = document.createElement("canvas");
+  c.width = Math.round(sw * scale) + pad * 2; c.height = Math.round(sh * scale) + pad * 2;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(src, sx, sy, sw, sh, pad, pad, c.width - pad * 2, c.height - pad * 2);
+  const img = ctx.getImageData(pad, pad, c.width - pad * 2, c.height - pad * 2);
+  const d = img.data;
+  // Otsu threshold
+  const hist = new Array(256).fill(0);
+  for (let i = 0; i < d.length; i += 4) hist[lumAt(d, i) | 0]++;
+  const total = d.length / 4;
+  let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
+  let sumB = 0, wB = 0, best = 0, thr = 128;
+  for (let i = 0; i < 256; i++) {
+    wB += hist[i]; if (!wB) continue;
+    const wF = total - wB; if (!wF) break;
+    sumB += i * hist[i];
+    const mB = sumB / wB, mF = (sum - sumB) / wF, v = wB * wF * (mB - mF) ** 2;
+    if (v > best) { best = v; thr = i; }
+  }
+  // Text is the minority class: white-on-dark (normal tag) or dark-on-light (selected tag).
+  let above = 0;
+  for (let i = 0; i < d.length; i += 4) if (lumAt(d, i) > thr) above++;
+  const textIsBright = above < total / 2;
+  for (let i = 0; i < d.length; i += 4) {
+    const ink = (lumAt(d, i) > thr) === textIsBright;
+    d[i] = d[i + 1] = d[i + 2] = ink ? 0 : 255; d[i + 3] = 255;
+  }
+  ctx.putImageData(img, pad, pad);
+  return c;
+}
+
+// The 5 tags sit in a 3-column x 2-row grid of equal buttons. From the buttons already
+// recognised, predict where the other grid cells are (they may look different, e.g. a
+// selected tag has a light background and wasn't found by the dark-button detector).
+function gridCandidates(matched, W, H) {
+  const med = (a) => [...a].sort((x, y) => x - y)[a.length >> 1];
+  const w = med(matched.map((b) => b.w)), h = med(matched.map((b) => b.h));
+  const cluster = (vals, tol) => vals.sort((a, b) => a - b).reduce((acc, v) => {
+    if (!acc.length || v - acc[acc.length - 1] > tol) acc.push(v); return acc; }, []);
+  const xs = cluster(matched.map((b) => b.x), w * 0.4), ys = cluster(matched.map((b) => b.y), h * 0.4);
+  const step = (vals, guess) => {
+    if (vals.length < 2) return guess;
+    const gap = Math.min(...vals.slice(1).map((v, i) => v - vals[i]));
+    return gap / Math.max(1, Math.round(gap / guess));
+  };
+  const dx = step(xs, w * 1.15), dy = step(ys, h * 1.55);
+  const out = [];
+  for (let r = -1; r <= 1; r++) for (let c = -2; c <= 2; c++) {
+    const x = Math.round(xs[0] + c * dx), y = Math.round(ys[0] + r * dy);
+    if (x < 0 || y < 0 || x + w > W || y + h > H) continue;
+    if (matched.some((b) => Math.abs(b.x - x) < w / 2 && Math.abs(b.y - y) < h / 2)) continue;
+    if (out.some((b) => Math.abs(b.x - x) < w / 2 && Math.abs(b.y - y) < h / 2)) continue;
+    out.push({ x, y, w, h });
+  }
+  return out;
+}
+
+function progress(p, msg) {
+  const bar = $("bar");
+  if (p == null) { bar.style.display = "none"; }
+  else { bar.style.display = "block"; bar.firstElementChild.style.width = Math.round(p * 100) + "%"; }
+  if (msg) setStatus(msg);
+}
+function setStatus(msg, cls = "") { const s = $("status"); s.textContent = msg; s.className = "status " + cls; }
+
+function clearPreview() { $("preview").style.display = "none"; setStatus(""); progress(null); }
+
+function drawOverlay(view, scale, found) {
+  const ctx = view.getContext("2d");
+  ctx.lineWidth = Math.max(2, view.width / 400);
+  ctx.font = `${Math.max(14, view.width / 60)}px system-ui, sans-serif`;
+  for (const f of found) {
+    const x = f.box.x / scale, y = f.box.y / scale, w = f.box.w / scale, h = f.box.h / scale;
+    ctx.strokeStyle = f.tag != null ? "#3ecf8e" : "rgba(255,90,90,.7)";
+    ctx.strokeRect(x, y, w, h);
+    if (f.tag != null) {
+      const label = "✓ " + TAGS[f.tag];
+      const tw = ctx.measureText(label).width + 10, th = parseInt(ctx.font) + 6;
+      ctx.fillStyle = "#3ecf8e"; ctx.fillRect(x, y - th, tw, th);
+      ctx.fillStyle = "#06150e"; ctx.fillText(label, x + 5, y - 6);
+    }
+  }
+}
+
+let busy = false;
+async function recognize(file) {
+  if (busy) return;
+  busy = true;
+  try {
+    const bmp = await createImageBitmap(file);
+    // full-size preview
+    const view = $("canvas");
+    view.width = bmp.width; view.height = bmp.height;
+    view.getContext("2d").drawImage(bmp, 0, 0);
+    $("preview").style.display = "block";
+
+    // analysis copy, normalised to ~1600px on the long side
+    const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height)) || 1;
+    const a = document.createElement("canvas");
+    a.width = Math.round(bmp.width * scale); a.height = Math.round(bmp.height * scale);
+    const actx = a.getContext("2d", { willReadFrequently: true });
+    actx.drawImage(bmp, 0, 0, a.width, a.height);
+    const t0 = performance.now();
+    const boxes = findTagButtons(actx.getImageData(0, 0, a.width, a.height));
+
+    const worker = await getWorker();
+    progress(0, `Reading ${boxes.length} button${boxes.length === 1 ? "" : "s"}…`);
+    await worker.setParameters({
+      tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE,
+      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz- ",
+    });
+    const found = [];
+    for (let i = 0; i < boxes.length; i++) {
+      const { data } = await worker.recognize(prepareCrop(a, boxes[i]));
+      const m = matchTag(data.text);
+      found.push({ box: boxes[i], text: data.text.trim(), tag: m ? m.tag : null });
+      progress((i + 1) / boxes.length);
+    }
+    let tags = [...new Set(found.filter((f) => f.tag != null).map((f) => f.tag))];
+    let method = "buttons";
+
+    if (tags.length && tags.length < 5) {
+      // Read the remaining cells of the 3x2 tag grid.
+      const cells = gridCandidates(found.filter((f) => f.tag != null).map((f) => f.box), a.width, a.height);
+      for (const box of cells) {
+        if (tags.length >= 5) break;
+        const { data } = await worker.recognize(prepareCrop(a, box));
+        const m = matchTag(data.text);
+        if (m && !tags.includes(m.tag)) {
+          tags.push(m.tag);
+          found.push({ box, text: data.text.trim(), tag: m.tag });
+          method = "buttons + grid";
+        }
+      }
+    }
+
+    if (!tags.length) {
+      // Fallback: OCR the whole screenshot, then search the text for tag names.
+      progress(0, "Scanning the whole screenshot…");
+      await worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT, tessedit_char_whitelist: "" });
+      const { data } = await worker.recognize(a);
+      for (const line of data.lines || []) {
+        const words = line.words.map((w) => w.text);
+        const cands = [];
+        for (let i = 0; i < words.length; i++) { cands.push([i, 1]); if (i + 1 < words.length) cands.push([i, 2]); }
+        for (const [i, n] of cands) {
+          const m = matchTag(words.slice(i, i + n).join(" "));
+          if (m && !tags.includes(m.tag) && tags.length < 5) {
+            tags.push(m.tag);
+            const ws = line.words.slice(i, i + n);
+            const bb = { x: Math.min(...ws.map((w) => w.bbox.x0)), y: Math.min(...ws.map((w) => w.bbox.y0)) };
+            bb.w = Math.max(...ws.map((w) => w.bbox.x1)) - bb.x; bb.h = Math.max(...ws.map((w) => w.bbox.y1)) - bb.y;
+            found.push({ box: bb, text: m.tag, tag: m.tag });
+            method = "buttons + full scan";
+          }
+        }
+      }
+    }
+
+    drawOverlay(view, scale, found);
+    progress(null);
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    window.__lastOcr = found.map((f) => ({ text: f.text, tag: f.tag != null ? TAGS[f.tag] : null }));
+    if (tags.length) {
+      setSelected(tags);
+      setStatus(`Found ${tags.length} tag${tags.length === 1 ? "" : "s"} in ${secs}s (${method}). Check them against the game and fix any mistakes below.`, tags.length === 5 ? "ok" : "warn");
+    } else {
+      setStatus("Couldn't find any tags. Use a screenshot of the Recruitment screen with the Instructions panel closed, or pick the tags by hand.", "warn");
+    }
+  } catch (err) {
+    console.error(err);
+    progress(null);
+    setStatus("Something went wrong: " + err.message, "warn");
+  } finally {
+    busy = false;
+  }
+}
+
+function setupInput() {
+  const drop = $("drop"), file = $("file");
+  drop.onclick = () => file.click();
+  drop.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") file.click(); };
+  file.onchange = () => file.files[0] && recognize(file.files[0]);
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("hover"); };
+  drop.ondragleave = () => drop.classList.remove("hover");
+  drop.ondrop = (e) => {
+    e.preventDefault(); drop.classList.remove("hover");
+    const f = [...e.dataTransfer.files].find((f) => f.type.startsWith("image/"));
+    if (f) recognize(f);
+  };
+  document.addEventListener("paste", (e) => {
+    const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/"));
+    if (item) { e.preventDefault(); recognize(item.getAsFile()); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+buildTagButtons();
+setupInput();
+$("opcount").textContent = OPS.length;
+$("footer").innerHTML = `Data: ${esc((DATA.region || "?").toUpperCase())} game data v${esc(DATA.version || "?")}, built ${esc(DATA.updated || "?")} · ${OPS.length} operators · OCR by <a href="https://github.com/naptha/tesseract.js">Tesseract.js</a> (WebAssembly). Unofficial fan tool.`;
+const fromUrl = (new URL(location.href).searchParams.get("tags") || "").split(",").filter(Boolean).map((x) => +x - 1);
+setSelected(fromUrl, true);
+window.rtc = { recognize, calculate, TAGS };
+</script>
+</body>
+</html>

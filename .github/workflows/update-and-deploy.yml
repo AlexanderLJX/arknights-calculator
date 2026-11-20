@@ -1,0 +1,87 @@
+# Keeps the operator data current and publishes the site to GitHub Pages.
+#
+# - Every 6 hours: downloads the latest EN game data. If the recruitable operators or
+#   their tags changed (a game patch), commits the new index.html and redeploys.
+#   If nothing changed, it does nothing.
+# - On every push to main: deploys the site.
+# - Can also be run by hand: Actions tab -> "Update data and deploy" -> Run workflow.
+#
+# If the game data format ever changes, build-data.mjs fails instead of writing bad data,
+# this run fails, and GitHub emails you. The live site keeps the last good data.
+
+name: Update data and deploy
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # commit the updated index.html
+  pages: write      # deploy to GitHub Pages
+  id-token: write
+
+concurrency:
+  group: update-and-deploy
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.decide.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Rebuild operator data from the latest game data
+        id: build
+        run: node build-data.mjs
+
+      - name: Commit updated data
+        if: steps.build.outputs.changed == 'true'
+        env:
+          SUMMARY: ${{ steps.build.outputs.summary }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git commit -m "Update operator data: $SUMMARY"
+          git push
+
+      - name: Decide whether to deploy
+        id: decide
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ] || [ "${{ steps.build.outputs.changed }}" = "true" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare site
+        if: steps.decide.outputs.deploy == 'true'
+        run: mkdir _site && cp index.html _site/
+
+      - uses: actions/configure-pages@v5
+        if: steps.decide.outputs.deploy == 'true'
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.decide.outputs.deploy == 'true'
+        with:
+          path: _site
+
+  deploy:
+    needs: update
+    if: needs.update.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
