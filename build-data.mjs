@@ -9,8 +9,12 @@
 // character_table.json (class, position and affix tags of each operator), then rewrites
 // the block between /*DATA_START*/ and /*DATA_END*/ in index.html.
 // Exits with an error, without writing, if anything doesn't line up.
+//
+// Also downloads any missing operator avatars into avatars/<char id>.webp (96px), from
+// https://github.com/yuanyan3060/ArknightsGameResource. Needs `npm install` once (sharp).
+// A missing avatar only prints a warning; the page shows a placeholder until a later run.
 
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir, access } from "node:fs/promises";
 
 const region = process.argv[2] || "en";
 const base = `https://raw.githubusercontent.com/ArknightsAssets/ArknightsGamedata/master/${region}/gamedata/excel`;
@@ -84,8 +88,8 @@ for (const r of recruitable) {
   if (r.rarity === 5) t.add(tagById[SENIOR]);
   if (r.rarity === 2) t.add(tagById[STARTER]);
   const tagIdx = [...t].filter((x) => tags.includes(x)).map((x) => tags.indexOf(x));
-  // compact row: [name, rarity, recruitmentOnly(0/1), [tag indexes]]
-  operators.push([r.name, r.rarity, r.only ? 1 : 0, tagIdx]);
+  // compact row: [name, rarity, recruitmentOnly(0/1), [tag indexes], char id]
+  operators.push([r.name, r.rarity, r.only ? 1 : 0, tagIdx, c.id]);
 }
 
 const names = operators.map((o) => o[0]);
@@ -112,12 +116,42 @@ async function output(changed, summary) {
   await appendFile(process.env.GITHUB_OUTPUT, `changed=${changed}\nsummary=${summary}\n`);
 }
 
+// Avatars: fetch only the ones not in avatars/ yet, shrink to 96px WebP (~3-6 KB each).
+const AVATAR_SRC = "https://raw.githubusercontent.com/yuanyan3060/ArknightsGameResource/main/avatar";
+const avatarDir = new URL("./avatars/", import.meta.url);
+await mkdir(avatarDir, { recursive: true });
+const exists = (u) => access(u).then(() => true, () => false);
+const missingAvatars = [];
+for (const o of operators) if (!(await exists(new URL(`${o[4]}.webp`, avatarDir)))) missingAvatars.push(o);
+const addedAvatars = [], failedAvatars = [];
+if (missingAvatars.length) {
+  const { default: sharp } = await import("sharp");
+  console.log(`Downloading ${missingAvatars.length} avatar(s) ...`);
+  for (const o of missingAvatars) {
+    try {
+      const res = await fetch(`${AVATAR_SRC}/${o[4]}.png`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const img = await sharp(Buffer.from(await res.arrayBuffer())).resize(96, 96).webp({ quality: 82 }).toBuffer();
+      await writeFile(new URL(`${o[4]}.webp`, avatarDir), img);
+      addedAvatars.push(o[0]);
+    } catch (e) {
+      failedAvatars.push(o[0]);
+      console.warn(`  ! avatar for ${o[0]} (${o[4]}) not available yet: ${e.message}`);
+    }
+  }
+}
+
 // Only rewrite when the recruitment data itself changed (not just the build date),
 // so a scheduled run with no game update produces no commit.
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 if (old.region === region && same(old.tags, tags) && same(old.operators, operators)) {
-  console.log(`No changes: ${operators.length} operators, ${region} data ${version}. index.html left as is.`);
-  await output(false, "");
+  if (addedAvatars.length) {
+    console.log(`Data unchanged; added avatars: ${addedAvatars.join(", ")}`);
+    await output(true, `avatars for ${addedAvatars.join(", ")}`);
+  } else {
+    console.log(`No changes: ${operators.length} operators, ${region} data ${version}. index.html left as is.`);
+    await output(false, "");
+  }
   process.exit(0);
 }
 
@@ -131,7 +165,7 @@ const removed = [...oldNames].filter((n) => !newNames.has(n));
 const parts = [];
 if (added.length) parts.push(`added ${added.join(", ")}`);
 if (removed.length) parts.push(`removed ${removed.join(", ")}`);
-if (!parts.length) parts.push("tag changes");
+if (!parts.length) parts.push("operator data changes");
 const summary = `${region} data ${version}: ${parts.join("; ")}`;
 
 const per = [1, 2, 3, 4, 5, 6].map((r) => `${r}★ ${operators.filter((o) => o[1] === r).length}`).join(", ");

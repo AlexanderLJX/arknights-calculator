@@ -1,0 +1,11 @@
+{
+  "name": "arknights-calculator",
+  "private": true,
+  "description": "Build tooling for the operator data and avatars (the site itself has no build step).",
+  "scripts": {
+    "build-data": "node build-data.mjs"
+  },
+  "dependencies": {
+    "sharp": "0.33.5"
+  }
+}

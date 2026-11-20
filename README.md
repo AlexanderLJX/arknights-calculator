@@ -25,8 +25,15 @@ GitHub emails you; the live site keeps the last good data.
 Note: GitHub pauses scheduled workflows in repos with no activity for 60 days. Data-update
 commits count as activity, but if it ever gets paused, re-enable it in the Actions tab.
 
+## Operator avatars
+`avatars/<char id>.webp` (96px, about 5 KB each) are downloaded by `build-data.mjs` from
+https://github.com/yuanyan3060/ArknightsGameResource and shrunk with `sharp`. Only missing
+ones are fetched, so a new operator's avatar is added automatically on the next update; if it
+isn't available yet, the page shows the operator's initial until a later run picks it up.
+Operator images © Hypergryph / Yostar.
+
 ## Update data by hand
-Requires Node 18+:
+Requires Node 18+ and `npm install` once:
 
     node build-data.mjs          # Global (EN) server
     node build-data.mjs jp       # or kr
