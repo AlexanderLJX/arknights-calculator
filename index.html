@@ -500,10 +500,8 @@ function drawOverlay(view, scale, found) {
 }
 
 let busy = false;
-// src: an image File/Blob, or a canvas (live capture). In live mode the page stays quiet:
-// no progress bar, no whole-image fallback, and it returns the tags instead of applying them.
-async function recognize(src, live = false) {
-  if (busy) return null;
+async function recognize(src) {
+  if (busy) return;
   busy = true;
   try {
     const bmp = await createImageBitmap(src);
@@ -523,8 +521,7 @@ async function recognize(src, live = false) {
     const boxes = findTagButtons(actx.getImageData(0, 0, a.width, a.height));
 
     const worker = await getWorker();
-    if (live && !boxes.length) { drawOverlay(view, scale, []); return []; }
-    if (!live) progress(0, `Reading ${boxes.length} button${boxes.length === 1 ? "" : "s"}…`);
+    progress(0, `Reading ${boxes.length} button${boxes.length === 1 ? "" : "s"}…`);
     await worker.setParameters({
       tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE,
       tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz- ",
@@ -534,7 +531,7 @@ async function recognize(src, live = false) {
       const { data } = await worker.recognize(prepareCrop(a, boxes[i]));
       const m = matchTag(data.text);
       found.push({ box: boxes[i], text: data.text.trim(), tag: m ? m.tag : null });
-      if (!live) progress((i + 1) / boxes.length);
+      progress((i + 1) / boxes.length);
     }
     let tags = [...new Set(found.filter((f) => f.tag != null).map((f) => f.tag))];
     let method = "buttons";
@@ -554,7 +551,7 @@ async function recognize(src, live = false) {
       }
     }
 
-    if (!tags.length && !live) {
+    if (!tags.length) {
       // Fallback: OCR the whole screenshot, then search the text for tag names.
       progress(0, "Scanning the whole screenshot…");
       await worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT, tessedit_char_whitelist: "" });
@@ -581,7 +578,6 @@ async function recognize(src, live = false) {
     progress(null);
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
     window.__lastOcr = found.map((f) => ({ text: f.text, tag: f.tag != null ? TAGS[f.tag] : null }));
-    if (live) return tags;
     if (tags.length) {
       setSelected(tags);
       setStatus(`Found ${tags.length} tag${tags.length === 1 ? "" : "s"} in ${secs}s (${method}). Check them against the game and fix any mistakes below.`, tags.length === 5 ? "ok" : "warn");
@@ -592,7 +588,6 @@ async function recognize(src, live = false) {
     console.error(err);
     progress(null);
     setStatus("Something went wrong: " + err.message, "warn");
-    return null;
   } finally {
     busy = false;
   }
@@ -601,71 +596,178 @@ async function recognize(src, live = false) {
 // ---------------------------------------------------------------------------
 // Live mode: share the game window/screen; read the tags whenever the picture changes.
 // ---------------------------------------------------------------------------
-const live = { stream: null, video: null, timer: 0, sig: null, pending: null, applied: "" };
+const live = { stream: null, video: null, ticker: null, prevSig: null, movingSince: 0, doneSig: null, doneAt: 0, lastCount: 0, applied: "" };
+const LIVE_MAX = 1600; // analysis size (long side), same as screenshots
 
-// Tiny grayscale thumbnail, to skip OCR when nothing on screen has changed.
-function frameSig(c) {
-  const t = document.createElement("canvas"); t.width = 48; t.height = 27;
-  const x = t.getContext("2d", { willReadFrequently: true });
-  x.drawImage(c, 0, 0, 48, 27);
-  const d = x.getImageData(0, 0, 48, 27).data, out = new Uint8Array(48 * 27);
+// Tiny grayscale thumbnail of the shared screen, to see whether the picture changed.
+const sigCanvas = document.createElement("canvas"); sigCanvas.width = 48; sigCanvas.height = 27;
+const sigCtx = sigCanvas.getContext("2d", { willReadFrequently: true });
+function frameSig(src) {
+  sigCtx.drawImage(src, 0, 0, 48, 27);
+  const d = sigCtx.getImageData(0, 0, 48, 27).data, out = new Uint8Array(48 * 27);
   for (let i = 0; i < out.length; i++) out[i] = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) / 3;
   return out;
 }
 const sigDiff = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]); return s / a.length; };
 
+// Two OCR workers so buttons are read in parallel; results are cached per button picture,
+// so after a tag refresh only the buttons that changed are read again.
+let poolPromise = null;
+function getPool() {
+  if (!poolPromise) poolPromise = Promise.all([getWorker(), Tesseract.createWorker("eng", 1)]);
+  return poolPromise;
+}
+async function resetWorkers() {
+  const old = [workerPromise, poolPromise];
+  workerPromise = poolPromise = null;
+  for (const p of old) {
+    try { const w = await p; (Array.isArray(w) ? w : [w]).forEach((x) => x.terminate()); } catch {}
+  }
+}
+const ocrCache = new Map();
+function boxSig(img, b) {
+  const { width: W, data: d } = img;
+  let s = b.w + ":" + b.h + ":";
+  for (let j = 0; j < 8; j++) for (let i = 0; i < 32; i++) {
+    const x = b.x + Math.floor(((i + 0.5) * b.w) / 32), y = b.y + Math.floor(((j + 0.5) * b.h) / 8);
+    s += String.fromCharCode(65 + (lumAt(d, (y * W + x) * 4) >> 4));
+  }
+  return s;
+}
+async function ocrBoxes(a, img, boxes) {
+  const pool = await getPool();
+  await Promise.all(pool.map((w) => w.setParameters({
+    tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE,
+    tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz- ",
+  })));
+  const out = new Array(boxes.length);
+  let next = 0;
+  await Promise.all(pool.map(async (w) => {
+    while (next < boxes.length) {
+      const i = next++, b = boxes[i], key = boxSig(img, b);
+      if (ocrCache.has(key)) { out[i] = ocrCache.get(key); continue; }
+      const { data } = await w.recognize(prepareCrop(a, b));
+      const m = matchTag(data.text);
+      out[i] = { text: data.text.trim(), tag: m ? m.tag : null };
+      if (ocrCache.size > 400) ocrCache.clear();
+      ocrCache.set(key, out[i]);
+    }
+  }));
+  return out;
+}
+
+async function liveRead(v) {
+  const s = Math.min(1, LIVE_MAX / Math.max(v.videoWidth, v.videoHeight));
+  const a = document.createElement("canvas");
+  a.width = Math.round(v.videoWidth * s); a.height = Math.round(v.videoHeight * s);
+  const ax = a.getContext("2d", { willReadFrequently: true });
+  ax.drawImage(v, 0, 0, a.width, a.height);
+  const img = ax.getImageData(0, 0, a.width, a.height);
+  const boxes = findTagButtons(img);
+  const found = (await ocrBoxes(a, img, boxes)).map((r, i) => ({ box: boxes[i], ...r }));
+  const tags = [...new Set(found.filter((f) => f.tag != null).map((f) => f.tag))];
+  if (tags.length && tags.length < 5) {
+    const cells = gridCandidates(found.filter((f) => f.tag != null).map((f) => f.box), a.width, a.height);
+    (await ocrBoxes(a, img, cells)).forEach((r, i) => {
+      if (r.tag != null && !tags.includes(r.tag) && tags.length < 5) { tags.push(r.tag); found.push({ box: cells[i], ...r }); }
+    });
+  }
+  const view = $("canvas");
+  view.width = a.width; view.height = a.height;
+  view.getContext("2d").drawImage(a, 0, 0);
+  $("preview").style.display = "block";
+  drawOverlay(view, 1, found);
+  window.__lastOcr = found.map((f) => ({ text: f.text, tag: f.tag != null ? TAGS[f.tag] : null }));
+  return tags;
+}
+
+const timeout = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error("timed out")), ms))]);
+
+// Runs 5 times a second. Reads the screen once the picture has settled after a change
+// (so a half-drawn transition is never read), and keeps retrying while tags are missing.
 async function liveTick() {
   const v = live.video;
   if (!live.stream || !v || !v.videoWidth || busy) return;
-  const c = document.createElement("canvas");
-  c.width = v.videoWidth; c.height = v.videoHeight;
-  c.getContext("2d").drawImage(v, 0, 0);
-  const sig = frameSig(c);
-  if (live.sig && sigDiff(sig, live.sig) < 1.5 && live.pending === null) return; // screen unchanged
-  live.sig = sig;
-  const tags = await recognize(c, true);
+  const now = performance.now();
+  const sig = frameSig(v);
+  const moving = live.prevSig && sigDiff(sig, live.prevSig) > 0.6;
+  live.prevSig = sig;
+  if (moving) { live.movingSince ||= now; if (now - live.movingSince < 1200) return; } // animated screens: read anyway after 1.2 s
+  else live.movingSince = 0;
+  const changed = !live.doneSig || sigDiff(sig, live.doneSig) > 0.3;
+  // missing tags: re-read often (cheap, unchanged buttons come from the cache)
+  const retry = live.lastCount < 5 && now - live.doneAt > (live.lastCount >= 3 ? 400 : 1500);
+  if (!changed && !retry) return;
+
+  busy = true;
+  let tags = null;
+  try {
+    tags = await timeout(liveRead(v), 10000);
+  } catch (err) {
+    console.warn("live read failed", err);
+    resetWorkers(); // a stuck OCR worker is replaced instead of freezing live mode
+  } finally {
+    busy = false;
+  }
+  live.doneSig = sig; live.doneAt = performance.now(); live.movingSince = 0;
   if (!live.stream || !tags) return;
-  const key = [...tags].sort((a, b) => a - b).join(",");
-  if (tags.length < 5) {
-    live.pending = null;
+  live.lastCount = tags.length;
+  if (tags.length < 3) {
     setStatus(live.applied ? "Live: showing the last tags found. Waiting for the Recruitment screen…" : "Live: waiting for the Recruitment screen (tag selection, Instructions panel closed)…");
     return;
   }
-  // Apply only after two reads in a row agree, so a half-drawn frame can't change the tags.
-  if (live.pending !== key) { live.pending = key; return; }
-  live.pending = null;
-  if (key !== live.applied) {
-    live.applied = key;
-    setSelected(tags);
+  const key = [...tags].sort((x, y) => x - y).join(",");
+  // 3-4 tags: something (usually the mouse pointer) covers a button. Show what was read,
+  // unless it's just a subset of the tags already shown, and keep retrying.
+  const shown = live.applied ? live.applied.split(",").map(Number) : [];
+  if (key !== live.applied && !(tags.length < 5 && tags.every((t) => shown.includes(t)))) {
+    live.applied = key; setSelected(tags);
   }
-  setStatus(`Live: found all 5 tags (${new Date().toLocaleTimeString()}).`, "ok");
+  const ms = Math.round(live.doneAt - now), time = new Date().toLocaleTimeString();
+  if (tags.length === 5) setStatus(`Live: found all 5 tags in ${ms} ms (${time}).`, "ok");
+  else setStatus(`Live: read ${tags.length} of 5 tags. Move the mouse pointer off the tags; retrying… (${time})`, "warn");
+}
+
+// The tick timer lives in a tiny worker: browsers throttle timers of a page that's
+// in the background (e.g. behind a full-screen game) but not timers in workers.
+function makeTicker(ms, fn) {
+  const src = "let t;onmessage=(e)=>{clearInterval(t);if(e.data)t=setInterval(()=>postMessage(0),e.data)}";
+  const w = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+  w.onmessage = fn;
+  w.postMessage(ms);
+  return w;
 }
 
 async function startLive() {
   try {
-    live.stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 5 }, audio: false });
+    // cursor: "never" asks the browser to leave the mouse pointer out of the capture (where supported)
+    live.stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 10, cursor: "never" }, audio: false });
   } catch (err) {
     live.stream = null;
     if (err.name !== "NotAllowedError") setStatus("Couldn't start screen capture: " + err.message, "warn");
     return;
   }
-  live.video = document.createElement("video");
-  live.video.muted = true; live.video.playsInline = true;
-  live.video.srcObject = live.stream;
-  await live.video.play();
-  live.sig = null; live.pending = null; live.applied = "";
+  const v = (live.video = document.createElement("video"));
+  v.muted = true; v.playsInline = true;
+  // kept in the page (invisible) so the browser keeps decoding frames
+  v.style.cssText = "position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none";
+  document.body.appendChild(v);
+  v.srcObject = live.stream;
+  await v.play();
+  Object.assign(live, { prevSig: null, movingSince: 0, doneSig: null, doneAt: 0, lastCount: 0, applied: "" });
   live.stream.getVideoTracks()[0].addEventListener("ended", stopLive);
-  live.timer = setInterval(liveTick, 1000);
+  live.ticker = makeTicker(200, liveTick);
   $("liveBtn").textContent = "■ Stop watching";
   $("liveBtn").classList.add("on");
   setStatus("Live: starting the text reader…");
-  liveTick();
+  getPool();
 }
 
 function stopLive() {
-  clearInterval(live.timer);
+  if (live.ticker) live.ticker.terminate();
   if (live.stream) live.stream.getTracks().forEach((t) => t.stop());
-  live.stream = null; live.video = null;
+  if (live.video) live.video.remove();
+  live.ticker = live.stream = live.video = null;
   $("liveBtn").textContent = "● Watch my screen (live)";
   $("liveBtn").classList.remove("on");
   setStatus(live.applied ? "Stopped watching. The last tags found are kept." : "Stopped watching.");
