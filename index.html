@@ -44,6 +44,10 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .drop.hover, .drop:hover { border-color: var(--accent); background: var(--panel-2); }
 .drop strong { color: var(--text); }
 kbd { background: var(--chip); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 13px; }
+.live-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.live-row .hint { font-size: 13px; }
+#liveBtn.on { background: #d64545; border-color: #d64545; color: #fff; }
+#liveBtn[hidden], #liveBtn[hidden] + .hint { display: none; }
 .preview { margin-top: 12px; display: none; }
 .preview canvas { width: 100%; height: auto; border-radius: 8px; display: block; }
 .status { margin-top: 10px; font-size: 14px; color: var(--muted); min-height: 1.5em; }
@@ -104,6 +108,10 @@ footer a { color: var(--accent); }
         <div class="drop" id="drop" tabindex="0">
           <strong>Paste</strong> with <kbd>Ctrl</kbd>+<kbd>V</kbd>, drop an image here, or <strong>click to choose</strong>.<br>
           <span style="font-size:13px">Everything runs on this device. The image is never uploaded.</span>
+        </div>
+        <div class="live-row">
+          <button class="btn" id="liveBtn" type="button">● Watch my screen (live)</button>
+          <span class="hint">Share the window running the game; tags update by themselves.</span>
         </div>
         <input type="file" id="file" accept="image/*" hidden>
         <div class="preview" id="preview"><canvas id="canvas"></canvas></div>
@@ -492,11 +500,13 @@ function drawOverlay(view, scale, found) {
 }
 
 let busy = false;
-async function recognize(file) {
-  if (busy) return;
+// src: an image File/Blob, or a canvas (live capture). In live mode the page stays quiet:
+// no progress bar, no whole-image fallback, and it returns the tags instead of applying them.
+async function recognize(src, live = false) {
+  if (busy) return null;
   busy = true;
   try {
-    const bmp = await createImageBitmap(file);
+    const bmp = await createImageBitmap(src);
     // full-size preview
     const view = $("canvas");
     view.width = bmp.width; view.height = bmp.height;
@@ -513,7 +523,8 @@ async function recognize(file) {
     const boxes = findTagButtons(actx.getImageData(0, 0, a.width, a.height));
 
     const worker = await getWorker();
-    progress(0, `Reading ${boxes.length} button${boxes.length === 1 ? "" : "s"}…`);
+    if (live && !boxes.length) { drawOverlay(view, scale, []); return []; }
+    if (!live) progress(0, `Reading ${boxes.length} button${boxes.length === 1 ? "" : "s"}…`);
     await worker.setParameters({
       tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE,
       tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz- ",
@@ -523,7 +534,7 @@ async function recognize(file) {
       const { data } = await worker.recognize(prepareCrop(a, boxes[i]));
       const m = matchTag(data.text);
       found.push({ box: boxes[i], text: data.text.trim(), tag: m ? m.tag : null });
-      progress((i + 1) / boxes.length);
+      if (!live) progress((i + 1) / boxes.length);
     }
     let tags = [...new Set(found.filter((f) => f.tag != null).map((f) => f.tag))];
     let method = "buttons";
@@ -543,7 +554,7 @@ async function recognize(file) {
       }
     }
 
-    if (!tags.length) {
+    if (!tags.length && !live) {
       // Fallback: OCR the whole screenshot, then search the text for tag names.
       progress(0, "Scanning the whole screenshot…");
       await worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT, tessedit_char_whitelist: "" });
@@ -570,6 +581,7 @@ async function recognize(file) {
     progress(null);
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
     window.__lastOcr = found.map((f) => ({ text: f.text, tag: f.tag != null ? TAGS[f.tag] : null }));
+    if (live) return tags;
     if (tags.length) {
       setSelected(tags);
       setStatus(`Found ${tags.length} tag${tags.length === 1 ? "" : "s"} in ${secs}s (${method}). Check them against the game and fix any mistakes below.`, tags.length === 5 ? "ok" : "warn");
@@ -580,9 +592,83 @@ async function recognize(file) {
     console.error(err);
     progress(null);
     setStatus("Something went wrong: " + err.message, "warn");
+    return null;
   } finally {
     busy = false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Live mode: share the game window/screen; read the tags whenever the picture changes.
+// ---------------------------------------------------------------------------
+const live = { stream: null, video: null, timer: 0, sig: null, pending: null, applied: "" };
+
+// Tiny grayscale thumbnail, to skip OCR when nothing on screen has changed.
+function frameSig(c) {
+  const t = document.createElement("canvas"); t.width = 48; t.height = 27;
+  const x = t.getContext("2d", { willReadFrequently: true });
+  x.drawImage(c, 0, 0, 48, 27);
+  const d = x.getImageData(0, 0, 48, 27).data, out = new Uint8Array(48 * 27);
+  for (let i = 0; i < out.length; i++) out[i] = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) / 3;
+  return out;
+}
+const sigDiff = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]); return s / a.length; };
+
+async function liveTick() {
+  const v = live.video;
+  if (!live.stream || !v || !v.videoWidth || busy) return;
+  const c = document.createElement("canvas");
+  c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext("2d").drawImage(v, 0, 0);
+  const sig = frameSig(c);
+  if (live.sig && sigDiff(sig, live.sig) < 1.5 && live.pending === null) return; // screen unchanged
+  live.sig = sig;
+  const tags = await recognize(c, true);
+  if (!live.stream || !tags) return;
+  const key = [...tags].sort((a, b) => a - b).join(",");
+  if (tags.length < 5) {
+    live.pending = null;
+    setStatus(live.applied ? "Live: showing the last tags found. Waiting for the Recruitment screen…" : "Live: waiting for the Recruitment screen (tag selection, Instructions panel closed)…");
+    return;
+  }
+  // Apply only after two reads in a row agree, so a half-drawn frame can't change the tags.
+  if (live.pending !== key) { live.pending = key; return; }
+  live.pending = null;
+  if (key !== live.applied) {
+    live.applied = key;
+    setSelected(tags);
+  }
+  setStatus(`Live: found all 5 tags (${new Date().toLocaleTimeString()}).`, "ok");
+}
+
+async function startLive() {
+  try {
+    live.stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 5 }, audio: false });
+  } catch (err) {
+    live.stream = null;
+    if (err.name !== "NotAllowedError") setStatus("Couldn't start screen capture: " + err.message, "warn");
+    return;
+  }
+  live.video = document.createElement("video");
+  live.video.muted = true; live.video.playsInline = true;
+  live.video.srcObject = live.stream;
+  await live.video.play();
+  live.sig = null; live.pending = null; live.applied = "";
+  live.stream.getVideoTracks()[0].addEventListener("ended", stopLive);
+  live.timer = setInterval(liveTick, 1000);
+  $("liveBtn").textContent = "■ Stop watching";
+  $("liveBtn").classList.add("on");
+  setStatus("Live: starting the text reader…");
+  liveTick();
+}
+
+function stopLive() {
+  clearInterval(live.timer);
+  if (live.stream) live.stream.getTracks().forEach((t) => t.stop());
+  live.stream = null; live.video = null;
+  $("liveBtn").textContent = "● Watch my screen (live)";
+  $("liveBtn").classList.remove("on");
+  setStatus(live.applied ? "Stopped watching. The last tags found are kept." : "Stopped watching.");
 }
 
 function setupInput() {
@@ -597,6 +683,12 @@ function setupInput() {
     const f = [...e.dataTransfer.files].find((f) => f.type.startsWith("image/"));
     if (f) recognize(f);
   };
+  const lb = $("liveBtn");
+  if (navigator.mediaDevices?.getDisplayMedia) {
+    lb.onclick = () => (live.stream ? stopLive() : startLive());
+  } else {
+    lb.hidden = true; // phones/tablets: browsers there can't capture the screen
+  }
   document.addEventListener("paste", (e) => {
     const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/"));
     if (item) { e.preventDefault(); recognize(item.getAsFile()); }

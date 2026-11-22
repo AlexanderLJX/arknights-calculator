@@ -5,6 +5,11 @@ Recruitment screen and it reads the 5 tags locally in your browser (Tesseract OC
 WebAssembly, CPU only, no uploads), then lists every tag combination that guarantees 4★+,
 5★, 6★ or a 1★ Robot.
 
+On a computer you can also press **Watch my screen (live)** and share the window running the
+game (an emulator, or the PC client). The page reads the tags about once a second while the
+picture changes, and updates the results by itself. Nothing leaves your computer. Phone and
+tablet browsers can't capture the screen, so the button is hidden there.
+
 ## Setup (once)
 Settings → Pages → Build and deployment → Source: **GitHub Actions**.
 
